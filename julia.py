@@ -7,7 +7,7 @@ from argparse import ArgumentParser
 from math import log, sqrt
 from tqdm import tqdm
 
-NPROC=12
+NPROC=multiprocessing.cpu_count()
 
 class Julia:
     def __init__(self, c, viewbox, max_iter=300):
@@ -87,18 +87,25 @@ def viewbox_at(center, scale, dim):
     return (l, b, r, t)
 
 def main():
+    global NPROC
+
     ap = ArgumentParser()
-    ap.add_argument('-s', '--supersample', type=int, default=1)
-    ap.add_argument('-r', '--resolution', nargs=2, type=int, default=(720,480))
-    ap.add_argument('-o', '--output', default='image.png')
+    ap.add_argument('-s', '--supersample', type=int, default=1,
+      help='take N^2 samples and then downsample [1]', metavar='N')
+    ap.add_argument('-r', '--resolution', nargs=2, type=int, default=(720,480),
+      help='output resolution [720 480]', metavar=('WIDTH','HEIGHT'))
+    ap.add_argument('-o', '--output', default='image.png',
+      help='Output filename [image.png]', metavar='PATH')
+    ap.add_argument('-p', '--nproc', default=NPROC,
+      help=f'Parallel processes to use [{NPROC}]', metavar='COUNT')
     args=ap.parse_args()
 
     ss=args.supersample
     dim=args.resolution
     n_samples=ss*ss*dim[0]*dim[1]
+    NPROC=args.nproc
 
-    print('Samples', n_samples)
-    #print('ETA', n_samples/(720*480*3*3)*3.9521849155426025)
+    print('Total samples to calculate:', n_samples)
 
     t0=time.time()
 
@@ -107,11 +114,11 @@ def main():
 
     t1=time.time()
     elapsed=t1-t0
-    time_per_pixel=1e6*elapsed/n_samples
+    time_per_sample=1e6*elapsed/n_samples
 
-    print('elapsed:', elapsed)
-    print('us/pixel:', time_per_pixel)
-    print(buf.dtype, buf.shape)
+    print(f'Elapsed: {elapsed:.3f} s')
+    print(f'µs/sample: {time_per_sample:.6f} s')
+    #print(buf.dtype, buf.shape)
 
     cvbuf = cv2ify(buf)
     save(args.output, cvbuf)
