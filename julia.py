@@ -35,7 +35,7 @@ def render(dim, sample):
     coords = (tr(x,y) for y in range(dim[1]) for x in range(dim[0]))
     with multiprocessing.Pool(NPROC) as pool:
         pixels = []
-        for p in tqdm(pool.imap(sample, coords, chunksize=256), total=dim[0]*dim[1]):
+        for p in tqdm(pool.imap(sample, coords, chunksize=8192), total=dim[0]*dim[1]):
             pixels += [p]
         pixels = tuple(pixels)
     buf = np.array(pixels, dtype='float64').reshape((dim[1],dim[0],-1))
@@ -66,8 +66,12 @@ def cv2ify(buf):
     n = 4 # resist downscaling by half
     buf += np.random.triangular(left=-0.5*n, mode=0, right=0.5*n, size=buf.shape)
 
-    buf = buf.astype('float16')
+    # cv2.imwrite only writes 16bit png if type is uint16, not float16
+    buf = np.clip(buf * 0xffff, 0, 0xffff).astype('uint16')
     return buf
+
+def save(fn,buf):
+    cv2.imwrite(fn, buf)
 
 def viewbox_at(center, scale, dim):
     d = sqrt( dim[0]**2 + dim[1]**2 )*2
@@ -108,9 +112,6 @@ def main():
 
     cvbuf = cv2ify(buf)
     save(args.output, cvbuf)
-
-def save(fn,buf):
-    cv2.imwrite(fn, buf)
 
 if __name__=='__main__':
     main()
