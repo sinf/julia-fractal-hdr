@@ -52,7 +52,7 @@ def map_gradient(buf, c0, c1):
     lo = buf.min()
     hi = buf.max()
     n = (buf - lo) / (hi - lo)
-    n = np.power(n, 0.7) # brighten up
+    #n = np.power(n, 0.7) # brighten up
     n = np.clip(n, 0, 1)
     return c0 + (c1-c0) * n.reshape((*buf.shape[:2],1))
 
@@ -105,6 +105,8 @@ def main():
     n_samples=ss*ss*dim[0]*dim[1]
     NPROC=args.nproc
 
+    print('Using processes:', NPROC)
+    print('Samples/pixel', ss**2)
     print('Total samples to calculate:', n_samples)
 
     t0=time.time()
