@@ -56,7 +56,7 @@ def map_gradient(buf, c0, c1):
     n = np.clip(n, 0, 1)
     return c0 + (c1-c0) * n.reshape((*buf.shape[:2],1))
 
-def cv2ify(buf):
+def format_output(buf):
     hi=0xffff
     buf = map_gradient(buf,
        hi * np.array((0,0,0)),
@@ -73,8 +73,16 @@ def cv2ify(buf):
 
     return buf
 
-def save(fn,buf):
-    cv2.imwrite(fn, buf)
+def save(fn, buf, cvbuf):
+    if fn.endswith('.bin'):
+      fn2=fn+'.u16'
+      with open(fn+'.txt', 'w') as f:
+        print(fn, buf.dtype, buf.shape, file=f)
+        print(fn2, cvbuf.dtype, cvbuf.shape, file=f)
+      buf.tofile(fn)
+      cvbuf.tofile(fn2)
+    else:
+      cv2.imwrite(fn, cvbuf)
 
 def viewbox_at(center, scale, dim):
     d = sqrt( dim[0]**2 + dim[1]**2 )*2
@@ -121,12 +129,11 @@ def main():
 
     print(f'Elapsed: {elapsed:.3f} s')
     print(f'µs/sample: {time_per_sample:.6f} s')
-    #print(buf.dtype, buf.shape)
 
-    cvbuf = cv2ify(buf)
+    cvbuf = format_output(buf)
 
     for filename in args.output:
-      save(filename, cvbuf)
+      save(filename, buf, cvbuf)
 
 if __name__=='__main__':
     main()
