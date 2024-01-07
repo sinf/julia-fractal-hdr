@@ -49,25 +49,28 @@ def render_ss(dim, sample, ss):
     return buf
 
 def map_gradient(buf, c0, c1):
-    c0 = np.array(c0, dtype=float) * 255.0
-    c1 = np.array(c1, dtype=float) * 255.0
     lo = buf.min()
     hi = buf.max()
-    #lo,hi = 0,200
     n = (buf - lo) / (hi - lo)
     n = np.power(n, 0.7) # brighten up
     n = np.clip(n, 0, 1)
-    return c0 + (c1-c0)*n.reshape((*buf.shape[:2],1))
+    return c0 + (c1-c0) * n.reshape((*buf.shape[:2],1))
 
 def cv2ify(buf):
-    buf = map_gradient(buf, (0,0,0), (1,1,0))
+    hi=0xffff
+    buf = map_gradient(buf,
+       hi * np.array((0,0,0)),
+       hi * np.array((0.393,0.87,0.041)),
+    )
 
     # noise fixes gradients by dithering when shit software downsamples image to 8bit
-    n = 4 # resist downscaling by half
-    buf += np.random.triangular(left=-0.5*n, mode=0, right=0.5*n, size=buf.shape)
+    n = 128
+    n *= 4 # resist downscaling by half
+    buf += np.random.triangular(left=-n, mode=0, right=n, size=buf.shape)
 
     # cv2.imwrite only writes 16bit png if type is uint16, not float16
-    buf = np.clip(buf * 0xffff, 0, 0xffff).astype('uint16')
+    buf = np.clip(buf, 0, hi).astype('uint16')
+
     return buf
 
 def save(fn,buf):
