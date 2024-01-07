@@ -94,8 +94,8 @@ def main():
       help='take N^2 samples and then downsample [1]', metavar='N')
     ap.add_argument('-r', '--resolution', nargs=2, type=int, default=(720,480),
       help='output resolution [720 480]', metavar=('WIDTH','HEIGHT'))
-    ap.add_argument('-o', '--output', default='image.png',
-      help='Output filename [image.png]', metavar='PATH')
+    ap.add_argument('-o', '--output', nargs='+', default=['image.png'],
+      help='Output filename(s) [image.png]', metavar='PATH')
     ap.add_argument('-p', '--nproc', default=NPROC,
       help=f'Parallel processes to use [{NPROC}]', metavar='COUNT')
     args=ap.parse_args()
@@ -108,6 +108,7 @@ def main():
     print('Using processes:', NPROC)
     print('Samples/pixel', ss**2)
     print('Total samples to calculate:', n_samples)
+    print('Outputs', args.output)
 
     t0=time.time()
 
@@ -123,7 +124,9 @@ def main():
     #print(buf.dtype, buf.shape)
 
     cvbuf = cv2ify(buf)
-    save(args.output, cvbuf)
+
+    for filename in args.output:
+      save(filename, cvbuf)
 
 if __name__=='__main__':
     main()
