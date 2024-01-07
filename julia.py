@@ -53,8 +53,10 @@ def map_gradient(buf, c0, c1):
     c1 = np.array(c1, dtype=float) * 255.0
     lo = buf.min()
     hi = buf.max()
-    lo,hi = 0,200
+    #lo,hi = 0,200
     n = (buf - lo) / (hi - lo)
+    n = np.power(n, 0.7) # brighten up
+    n = np.clip(n, 0, 1)
     return c0 + (c1-c0)*n.reshape((*buf.shape[:2],1))
 
 def cv2ify(buf):
