@@ -94,6 +94,7 @@ def render_ss(dim, sample, ss):
     dim2=(dim[0]*ss, dim[1]*ss)
     buf=render(dim2, sample)
     if ss>1:
+        print('Downsampling...')
         buf=ndimage.zoom(buf, (1/ss,1/ss,1), order=3, prefilter=True)
     return buf
 
@@ -191,9 +192,11 @@ def main():
     print(f'Elapsed: {elapsed:.3f} s')
     print(f'µs/sample: {time_per_sample:.6f} s')
 
+    print('Output conversion...')
     cvbuf = format_output(buf)
 
     for filename in args.output:
+        print('Saving', filename)
       save(filename, buf, cvbuf)
 
 if __name__=='__main__':
