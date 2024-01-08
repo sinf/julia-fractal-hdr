@@ -2,6 +2,7 @@ import time
 import numpy as np
 import cv2
 from scipy import ndimage
+from scipy.interpolate import CubicSpline
 import multiprocessing
 from argparse import ArgumentParser
 from math import log, sqrt
@@ -96,20 +97,32 @@ def render_ss(dim, sample, ss):
         buf=ndimage.zoom(buf, (1/ss,1/ss,1), order=3, prefilter=True)
     return buf
 
-def map_gradient(buf, c0, c1):
-    lo = buf.min()
-    hi = buf.max()
-    n = (buf - lo) / (hi - lo)
-    #n = np.power(n, 0.7) # brighten up
-    n = np.clip(n, 0, 1)
-    return c0 + (c1-c0) * n.reshape((*buf.shape[:2],1))
+def colorize(buf):
+    def hexcolor(x):
+        return np.array([int(x[i:i+2],16)/255.0 for i in (4,2,0)])
+    colormap = [
+        (0.00, (0,0,0)),
+        (0.02, (0,0,0)),
+        (0.07, hexcolor('64dd0a')*0.30),
+        (0.60, hexcolor('64dd0a')),
+        #(0.90, hexcolor('ffc900')),
+        (1.00, (1.0,1.0,1.0)),
+    ]
+    cs = CubicSpline(*zip(*colormap))
+    m = cs(buf)
+    m = np.clip(m, 0, 1)
+    return m.reshape((*buf.shape[:2], 3))
+
+def normalize(buf):
+    lo,hi = buf.min(), buf.max()
+    return (buf - lo) / (hi - lo)
 
 def format_output(buf):
+    buf = normalize(buf)
+    buf = colorize(buf)
+
     hi=0xffff
-    buf = map_gradient(buf,
-       hi * np.array((0,0,0)),
-       hi * np.array((0.393,0.87,0.041)),
-    )
+    buf *= hi
 
     # noise fixes gradients by dithering when shit software downsamples image to 8bit
     n = 128
