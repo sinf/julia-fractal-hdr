@@ -70,8 +70,8 @@ def blit(dst, src, dst_y, dst_x):
     dst[dst_y:dst_y+rows , dst_x:dst_x+cols] = src
 
 def render(dim, sample):
-    chunk2 = 256  # each process gets this many level 1 chunks
-    tile = 32 # samples are grouped into arrays of this size 64x64
+    tiles_per_proc = 256  # each process gets this many tiles
+    tile = 32
     ntx,nty,coords_n = next(coords_gen(dim, tile, 'count'))
     coords = coords_gen(dim, tile, 'gen')
     print('Buffer size:', dim)
@@ -82,7 +82,7 @@ def render(dim, sample):
     with multiprocessing.Pool(NPROC) as pool:
         buf = np.zeros(dim, dtype='float64')
         with tqdm(total=dim[0]*dim[1]) as progress:
-            for tile_pos, result in pool.imap(sample, coords, chunksize=chunk2):
+            for tile_pos, result in pool.imap(sample, coords, chunksize=tiles_per_proc):
                 p=len(result)
                 blit(buf, result.reshape((tile,tile)), *tile_pos)
                 progress.update(p)
