@@ -104,7 +104,7 @@ def main():
       help='output resolution [720 480]', metavar=('WIDTH','HEIGHT'))
     ap.add_argument('-o', '--output', nargs='+', default=['image.png'],
       help='Output filename(s) [image.png]', metavar='PATH')
-    ap.add_argument('-p', '--nproc', default=NPROC,
+    ap.add_argument('-p', '--nproc', default=NPROC, type=int,
       help=f'Parallel processes to use [{NPROC}]', metavar='COUNT')
     args=ap.parse_args()
 
