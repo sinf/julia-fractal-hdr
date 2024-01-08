@@ -10,35 +10,83 @@ from tqdm import tqdm
 NPROC=multiprocessing.cpu_count()
 
 class Julia:
-    def __init__(self, c, viewbox, max_iter=300):
+    def __init__(self, c, viewbox, max_iter=1000):
         """ viewbox: (min real, min imag, max real, max imag) """
-        self.c = c
+        self.c = np.complex128(c)
         self.max_iter = max_iter
-        self.view_org = complex(viewbox[0], viewbox[1])
-        self.view_scale = (viewbox[2]-viewbox[0], viewbox[3]-viewbox[1])
+        self.view_org = np.array((viewbox[0], viewbox[1]))
+        self.view_scale = np.array((viewbox[2]-viewbox[0], viewbox[3]-viewbox[1]))
 
-    def sample(self, point):
-        """ https://linas.org/art-gallery/escape/escape.html """
-        z = self.view_org + complex(self.view_scale[0]*point[0], self.view_scale[1]*point[1])
+    def sample(self, tile):
+        """ https://linas.org/art-gallery/escape/escape.html
+        points: 2d numpy array of points (float)
+        output: 1d numpy array of intensity
+        """
+        whatever, points = tile
+        z = self.view_org + self.view_scale*points
+        z = z.astype('float64').view(dtype=np.complex128).flatten()
         c = self.c
-        for n in range(self.max_iter):
-            z = z*z + c
-            if z.real*z.real + z.imag*z.imag > 2*2:
-                break
-        for _ in range(3):
-            z = z*z + c
-        za = max(abs(z), 1.0000001)
-        return n - log(log(za)) / log(2)
+        n = np.zeros(len(points), dtype=int)
+        mask = np.full(len(points), False)
+        with np.errstate(divide='ignore', under='ignore', over='ignore', invalid='ignore'):
+            for _ in range(self.max_iter):
+                z1 = z*z + c
+                mask = ( z1.real*z1.real + z1.imag*z1.imag > 2*2 ).flatten()
+                masknot = ~mask
+                z = z*mask + z1*masknot
+                if mask.all():
+                    break
+                n += masknot.astype(int)
+            n = np.asarray(n)
+            for _ in range(3):
+                z = z*z + c
+        za = np.maximum(np.abs(z), 1.0000001)
+        return whatever , n - np.log(np.log(za)).flatten() / np.log(2)
+
+def coords_gen(dim, tile, mode):
+    dimy,dimx = dim
+    ntx=(dimx+tile-1)//tile
+    nty=(dimy+tile-1)//tile
+    if mode=='count':
+        yield (ntx, nty, ntx*nty)
+        return
+    for ty in range(nty):
+        for tx in range(ntx):
+            points=[]
+            for yy in range(tile):
+                y=ty*tile + yy
+                if y>=dimy:
+                    break
+                for xx in range(tile):
+                    x=tx*tile + xx
+                    if x>=dimx:
+                        break
+                    points.append( (x/(dimx-1), 1-y/(dimy-1)) )
+            yield (ty*tile, tx*tile), np.array(points, dtype='float64')
+
+def blit(dst, src, dst_y, dst_x):
+    rows,cols = src.shape[:2]
+    dst[dst_y:dst_y+rows , dst_x:dst_x+cols] = src
 
 def render(dim, sample):
-    tr = lambda x,y: (x/(dim[0]-1), 1-y/(dim[1]-1))
-    coords = (tr(x,y) for y in range(dim[1]) for x in range(dim[0]))
+    chunk2 = 256  # each process gets this many level 1 chunks
+    tile = 32 # samples are grouped into arrays of this size 64x64
+    ntx,nty,coords_n = next(coords_gen(dim, tile, 'count'))
+    coords = coords_gen(dim, tile, 'gen')
+    print('Buffer size:', dim)
+    print(f'Tile size: {tile}x{tile} = {tile*tile}')
+    print('Tiles:', coords_n)
+    print('Tiles/process:', coords_n/NPROC)
+
     with multiprocessing.Pool(NPROC) as pool:
-        pixels = []
-        for p in tqdm(pool.imap(sample, coords, chunksize=8192), total=dim[0]*dim[1]):
-            pixels += [p]
-        pixels = tuple(pixels)
-    buf = np.array(pixels, dtype='float64').reshape((dim[1],dim[0],-1))
+        buf = np.zeros(dim, dtype='float64')
+        with tqdm(total=dim[0]*dim[1]) as progress:
+            for tile_pos, result in pool.imap(sample, coords, chunksize=chunk2):
+                p=len(result)
+                blit(buf, result.reshape((tile,tile)), *tile_pos)
+                progress.update(p)
+
+    buf = buf.reshape((dim[0],dim[1],-1))
     return buf
 
 def render_ss(dim, sample, ss):
@@ -84,10 +132,10 @@ def save(fn, buf, cvbuf):
     else:
       cv2.imwrite(fn, cvbuf)
 
-def viewbox_at(center, scale, dim):
-    d = sqrt( dim[0]**2 + dim[1]**2 )*2
-    x = dim[0] / d * scale
-    y = dim[1] / d * scale
+def viewbox_at(center, scale, dimx, dimy):
+    d = sqrt( dimx**2 + dimy**2 )*2
+    x = dimx / d * scale
+    y = dimy / d * scale
     l = center[0] - x
     r = center[0] + x
     b = center[1] - y
@@ -109,7 +157,7 @@ def main():
     args=ap.parse_args()
 
     ss=args.supersample
-    dim=args.resolution
+    dim=(args.resolution[1], args.resolution[0])
     n_samples=ss*ss*dim[0]*dim[1]
     NPROC=args.nproc
 
@@ -120,7 +168,7 @@ def main():
 
     t0=time.time()
 
-    fractal=Julia(c=(0.37+0.1j), viewbox=viewbox_at((0.165,0.12),0.15,dim))
+    fractal=Julia(c=(0.37+0.1j), viewbox=viewbox_at((0.165,0.12),0.15,dim[1],dim[0]))
     buf=render_ss(dim, fractal.sample, ss)
 
     t1=time.time()
