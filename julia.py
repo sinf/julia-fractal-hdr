@@ -1,3 +1,4 @@
+import os
 import time
 import numpy as np
 import cv2
@@ -65,7 +66,7 @@ def coords_gen(dim, tile, mode):
                     points.append( (x/(dimx-1), 1-y/(dimy-1)) )
             yield (ty*tile, tx*tile), np.array(points, dtype='float64')
 
-def blit(dst, src, dst_y, dst_x):
+def blit(dst, src, dst_y=0, dst_x=0):
     rows,cols = src.shape[:2]
     dst[dst_y:dst_y+rows , dst_x:dst_x+cols] = src
 
@@ -122,6 +123,25 @@ def normalize(buf):
     lo,hi = buf.min(), buf.max()
     return (buf - lo) / (hi - lo)
 
+def add_noise(buf):
+    fn='image/blue.png' # from https://graemephi.github.io/posts/some-low-discrepancy-noise-functions/
+    if os.path.exists(fn):
+        n = cv2.imread(fn).astype('float64') - 127.5
+        h,w = buf.shape[:2]
+        nh,nw = n.shape[:2]
+        for y in range((h+nh-1)//nh):
+            y0=y*nh
+            y1=min(y0+nh, h)
+            for x in range((w+nw-1)//nw):
+                x0=x*nw
+                x1=min(x0+nw, w)
+                buf[y0:y1 , x0:x1 , :] += n[:y1-y0 , :x1-x0]
+    else:
+        print('did not find', fn, 'using triangular noise instead')
+        n = 128
+        buf += np.random.triangular(left=-n, mode=0, right=n, size=buf.shape)
+    return buf
+
 def format_output(buf):
     buf = normalize(buf)
     buf = colorize(buf)
@@ -130,9 +150,7 @@ def format_output(buf):
     buf *= hi
 
     # noise fixes gradients by dithering when shit software downsamples image to 8bit
-    n = 128
-    n *= 4 # resist downscaling by half
-    buf += np.random.triangular(left=-n, mode=0, right=n, size=buf.shape)
+    buf = add_noise(buf)
 
     # cv2.imwrite only writes 16bit png if type is uint16, not float16
     buf = np.clip(buf, 0, hi).astype('uint16')
