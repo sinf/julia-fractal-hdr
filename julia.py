@@ -69,9 +69,10 @@ def blit(dst, src, dst_y, dst_x):
     rows,cols = src.shape[:2]
     dst[dst_y:dst_y+rows , dst_x:dst_x+cols] = src
 
-def render(dim, sample):
+def render(dim1, sample):
     tiles_per_proc = 256  # each process gets this many tiles
     tile = 32
+    dim=(dim1[0]+tile-1)//tile*tile , (dim1[1]+tile-1)//tile*tile
     ntx,nty,coords_n = next(coords_gen(dim, tile, 'count'))
     coords = coords_gen(dim, tile, 'gen')
     print('Buffer size:', dim)
@@ -88,6 +89,7 @@ def render(dim, sample):
                 progress.update(p)
 
     buf = buf.reshape((dim[0],dim[1],-1))
+    buf = buf[:dim1[0],:dim1[1],:]
     return buf
 
 def render_ss(dim, sample, ss):
