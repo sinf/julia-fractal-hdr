@@ -196,7 +196,7 @@ def main():
     cvbuf = format_output(buf)
 
     for filename in args.output:
-        print('Saving', filename)
+      print('Saving', filename)
       save(filename, buf, cvbuf)
 
 if __name__=='__main__':
