@@ -2,14 +2,29 @@ import os
 import time
 import numpy as np
 import cv2
-from scipy import ndimage
-from scipy.interpolate import CubicSpline
 import multiprocessing
+from scipy.interpolate import CubicSpline
+from scipy.stats.qmc import Halton
 from argparse import ArgumentParser
 from math import log, sqrt
 from tqdm import tqdm
 
+try:
+    from itertools import batched
+except ImportError:
+    # <3.12
+    from itertools import takewhile, zip_longest
+    def batched(iterable, n):
+        fillvalue = object()
+        args = (iter(iterable),) * n
+        for x in zip_longest(*args, fillvalue=fillvalue):
+            if x[-1] is fillvalue:
+                yield tuple(takewhile(lambda v: v is not fillvalue, x))
+            else:
+                yield x
+
 NPROC=multiprocessing.cpu_count()
+MAX_SAMPLE_BATCH=1024
 
 class Julia:
     def __init__(self, c, viewbox, max_iter=1000):
@@ -20,11 +35,20 @@ class Julia:
         self.view_scale = np.array((viewbox[2]-viewbox[0], viewbox[3]-viewbox[1]))
 
     def sample(self, tile):
+        whatever, points = tile
+        if len(points) <= MAX_SAMPLE_BATCH:
+            values = self.sample1(points)
+        else:
+            values = np.array([], dtype='float64')
+            for B in batched(points, MAX_SAMPLE_BATCH): 
+                values = np.concatenate((values, self.sample1(B)))
+        return whatever, values
+
+    def sample1(self, points):
         """ https://linas.org/art-gallery/escape/escape.html
         points: 2d numpy array of points (float)
         output: 1d numpy array of intensity
         """
-        whatever, points = tile
         z = self.view_org + self.view_scale*points
         z = z.astype('float64').view(dtype=np.complex128).flatten()
         c = self.c
@@ -43,15 +67,17 @@ class Julia:
             for _ in range(3):
                 z = z*z + c
         za = np.maximum(np.abs(z), 1.0000001)
-        return whatever , n - np.log(np.log(za)).flatten() / np.log(2)
+        return n - np.log(np.log(za)).flatten() / np.log(2)
 
-def coords_gen(dim, tile, mode):
+def coords_gen(dim, tile, mode, ss=0):
     dimy,dimx = dim
     ntx=(dimx+tile-1)//tile
     nty=(dimy+tile-1)//tile
+    k=ss*ss
     if mode=='count':
-        yield (ntx, nty, ntx*nty)
+        yield (ntx, nty, ntx*nty, k)
         return
+    subpos=(Halton(d=2).random(k)-0.5)/np.array((dimx,dimy))
     for ty in range(nty):
         for tx in range(ntx):
             points=[]
@@ -63,19 +89,21 @@ def coords_gen(dim, tile, mode):
                     x=tx*tile + xx
                     if x>=dimx:
                         break
-                    points.append( (x/(dimx-1), 1-y/(dimy-1)) )
+                    p=np.array((x/(dimx-1), 1-y/(dimy-1)))
+                    for offset in subpos:
+                        points.append( offset + p )
             yield (ty*tile, tx*tile), np.array(points, dtype='float64')
 
 def blit(dst, src, dst_y=0, dst_x=0):
     rows,cols = src.shape[:2]
     dst[dst_y:dst_y+rows , dst_x:dst_x+cols] = src
 
-def render(dim1, sample):
+def render_ss(dim1, sample, ss):
     tiles_per_proc = 256  # each process gets this many tiles
-    tile = 32
+    tile = 4
     dim=(dim1[0]+tile-1)//tile*tile , (dim1[1]+tile-1)//tile*tile
-    ntx,nty,coords_n = next(coords_gen(dim, tile, 'count'))
-    coords = coords_gen(dim, tile, 'gen')
+    ntx,nty,coords_n,subsamples = next(coords_gen(dim, tile, 'count', ss))
+    coords = coords_gen(dim, tile, 'gen', ss)
     print('Buffer size:', dim)
     print(f'Tile size: {tile}x{tile} = {tile*tile}')
     print('Tiles:', coords_n)
@@ -83,22 +111,15 @@ def render(dim1, sample):
 
     with multiprocessing.Pool(NPROC) as pool:
         buf = np.zeros(dim, dtype='float64')
-        with tqdm(total=dim[0]*dim[1]) as progress:
+        with tqdm(total=dim[0]*dim[1]*subsamples) as progress:
             for tile_pos, result in pool.imap(sample, coords, chunksize=tiles_per_proc):
                 p=len(result)
-                blit(buf, result.reshape((tile,tile)), *tile_pos)
+                mean = result.reshape((tile,tile,subsamples)).mean(axis=2,keepdims=True)
+                blit(buf, mean.reshape((tile,tile)), *tile_pos)
                 progress.update(p)
 
     buf = buf.reshape((dim[0],dim[1],-1))
     buf = buf[:dim1[0],:dim1[1],:]
-    return buf
-
-def render_ss(dim, sample, ss):
-    dim2=(dim[0]*ss, dim[1]*ss)
-    buf=render(dim2, sample)
-    if ss>1:
-        print('Downsampling...')
-        buf=ndimage.zoom(buf, (1/ss,1/ss,1), order=3, prefilter=True)
     return buf
 
 def colorize(buf):
