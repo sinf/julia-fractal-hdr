@@ -105,7 +105,7 @@ def colorize(buf):
         (0.00, (0,0,0)),
         (0.02, (0,0,0)),
         (0.07, hexcolor('64dd0a')*0.30),
-        (0.60, hexcolor('64dd0a')),
+        (0.90, hexcolor('64dd0a')),
         #(0.90, hexcolor('ffc900')),
         (1.00, (1.0,1.0,1.0)),
     ]
@@ -115,6 +115,8 @@ def colorize(buf):
     return m.reshape((*buf.shape[:2], 3))
 
 def normalize(buf):
+    #fixed constant here keeps brightness the same with different resolutions
+    return (buf-1)/950;
     lo,hi = buf.min(), buf.max()
     return (buf - lo) / (hi - lo)
 
