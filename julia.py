@@ -59,7 +59,6 @@ class Julia:
         z = z.astype('float64').view(dtype=np.complex128).flatten()
         c = self.c
         n = np.zeros(len(points), dtype=int)
-        mask = np.full(len(points), False)
         with np.errstate(divide='ignore', under='ignore', over='ignore', invalid='ignore'):
             for _ in range(self.max_iter):
                 z1 = z*z + c
@@ -76,14 +75,36 @@ class Julia:
         return n - np.log(np.log(za)).flatten() / np.log(2)
 
     def sample_cupy(self, tile):
-        return tile[0], self.sample_cupy1(tile[1])
+        return tile[0], self.sample_cupy2(tile[1])
+        #return tile[0], self.sample_cupy1(tile[1])
 
     def sample_cupy1(self, points):
         px,py = cupy.asarray(points, dtype='float32').T
         result = cupy.zeros(len(points), dtype='float32')
         return self.cupy_kernel(px, py, result)
 
+    def sample_cupy2(self, points):
+        z = self.view_org_cupy + self.view_scale_cupy * cupy.asarray(points, dtype='float32')
+        z = z.astype('float32').view(dtype=cupy.complex64).flatten()
+        c = self.c_cupy
+        n = cupy.zeros(len(points), dtype=int)
+        for _ in range(self.max_iter):
+            z1 = z*z + c
+            mask = ( z1.real*z1.real + z1.imag*z1.imag > 2*2 ).flatten()
+            masknot = ~mask
+            z = z*mask + z1*masknot
+            if mask.all():
+                break
+            n += masknot.astype(int)
+        for _ in range(3):
+            z = z*z + c
+        za = cupy.maximum(cupy.abs(z), 1.0000001)
+        return n - cupy.log(cupy.log(za)).flatten() / np.log(2)
+
     def init_cupy(self):
+        self.view_org_cupy = cupy.asarray(self.view_org, dtype='float32')
+        self.view_scale_cupy = cupy.asarray(self.view_scale, dtype='float32')
+        self.c_cupy = cupy.complex64(self.c)
         c=self.c
         # line 1 is line 16
         # i is illegal variable name (cant redeclare)
@@ -162,8 +183,8 @@ def render_ss(dim1, sample, subsamples):
     return buf
 
 def render_cupy(dim1, sample, subsamples):
-    tiles_per_proc = 64  # each process gets this many tiles
-    tile = 8
+    tiles_per_proc = 8  # each process gets this many tiles
+    tile = 4
     dim=(dim1[0]+tile-1)//tile*tile , (dim1[1]+tile-1)//tile*tile
     ntx,nty,coords_n = next(coords_gen(dim, tile, 'count', subsamples))
     coords = coords_gen(dim, tile, 'gen', subsamples, dtype='float32')
@@ -188,7 +209,7 @@ def render_cupy(dim1, sample, subsamples):
                     yield thing
                     progress.update(p)
 
-    for tile_pos, result in iterate1():
+    for tile_pos, result in iteratemp():
         mean = result.reshape((tile,tile,subsamples)).mean(axis=2,keepdims=True).reshape((tile,tile))
         mean = cupy.asnumpy(mean)
         blit(buf, mean, *tile_pos)
