@@ -15,19 +15,8 @@ try:
 except ImportError:
     print('failed to import cupy')
 
-try:
-    from itertools import batched
-except ImportError:
-    # <3.12
-    from itertools import takewhile, zip_longest
-    def batched(iterable, n):
-        fillvalue = object()
-        args = (iter(iterable),) * n
-        for x in zip_longest(*args, fillvalue=fillvalue):
-            if x[-1] is fillvalue:
-                yield tuple(takewhile(lambda v: v is not fillvalue, x))
-            else:
-                yield x
+def batched_list(items, batch_size):
+    return ( items[i:i+batch_size] for i in range(0, len(items), batch_size) )
 
 NPROC=multiprocessing.cpu_count()
 MAX_SAMPLE_BATCH=1024
@@ -40,30 +29,25 @@ class Julia:
         self.view_org = np.array((viewbox[0], viewbox[1]))
         self.view_scale = np.array((viewbox[2]-viewbox[0], viewbox[3]-viewbox[1]))
 
-    def sample(self, tile):
-        whatever, points = tile
+    def sample(self, points):
         if len(points) <= MAX_SAMPLE_BATCH:
             values = self.sample1(points)
         else:
-            values = np.array([], dtype=tile[1].dtype)
-            for B in batched(points, MAX_SAMPLE_BATCH): 
-                values = np.concatenate((values, self.sample1(B)))
-        return whatever, values
+            values = np.array([], dtype='float32')
+            for B in batched_list(points, MAX_SAMPLE_BATCH): 
+                values = np.concatenate((values, self.sample1(B)), dtype='float32')
+        return values
 
     def sample1(self, points):
         """ https://linas.org/art-gallery/escape/escape.html
         points: 2d numpy array of points (float)
         output: 1d numpy array of intensity
         """
+        points = points.astype('float64')
         z = self.view_org + self.view_scale*points
-        if z.dtype == 'float64':
-            z = z.flatten().view(dtype=np.complex128)
-            c = np.complex128(self.c)
-        else:
-            assert z.dtype == 'float32'
-            z = z.flatten().view(dtype=np.complex64)
-            c = np.complex64(self.c)
-        n = np.zeros(len(points), dtype=int)
+        z = z.astype('float64').flatten().view(dtype=np.complex128)
+        c = np.complex128(self.c)
+        n = np.zeros(len(points), dtype='int32')
         with np.errstate(divide='ignore', under='ignore', over='ignore', invalid='ignore'):
             for _ in range(self.max_iter):
                 z1 = z*z + c
@@ -77,23 +61,21 @@ class Julia:
             for _ in range(3):
                 z = z*z + c
         za = np.maximum(np.abs(z), 1.0000001)
-        return n - np.log(np.log(za)).flatten() / np.log(2)
+        out = n - np.log(np.log(za)).flatten() / np.log(2)
+        return out.astype('float32')
 
-    def sample_cupy(self, tile):
-        whatever, points = tile
+    def sample_cupy(self, points):
         px,py = cupy.asarray(points, dtype='float32').T
         result = cupy.zeros(len(points), dtype='float32')
-        result = self.cupy_kernel(px, py, result)
-        return whatever, result
+        return self.cupy_kernel(px, py, result)
 
     def init_cupy(self):
         c=self.c
         # line 1 is line 16
         # i is illegal variable name (cant redeclare)
-        self.cupy_kernel = cupy.ElementwiseKernel(\
-in_params = 'float32 px, float32 py',\
-out_params ='float32 y', \
-operation = f'''
+        self.cupy_kernel = cupy.ElementwiseKernel(
+            in_params = 'float32 px, float32 py',
+            out_params ='float32 y', operation = f'''
 double za=0, zr, zi, zr1, zi1;
 int n;
 zr = {self.view_org[0]} + {self.view_scale[0]}*(double)px;
@@ -109,8 +91,7 @@ for(n=0; n<{self.max_iter}; n+=1) {{
 za = max(za, 1.0000001);
 za = sqrt(za);
 y = n - log(log(za)) * {1.0/np.log(2)} ;
-''', \
-name='julia')
+''', name='julia')
 
 def coords_gen(dim, tile, mode, k, cu=np, dtype='float64'):
     dimy,dimx = dim
@@ -135,60 +116,103 @@ def coords_gen(dim, tile, mode, k, cu=np, dtype='float64'):
                     co=(x/(dimx-1), 1-y/(dimy-1))
                     p=subpos + cu.array(co, dtype=dtype)
                     points=p if points is None else cu.concatenate((points, p))
-            yield (ty*tile, tx*tile), points
+            yield points
+
+def merge_tiles(all_points, min_batch_size, cu=np):
+    n=0
+    p=[]
+    for points in all_points:
+        p += [points]
+        n += len(points)
+        if n >= min_batch_size:
+            yield cu.concatenate(p, axis=0)
+            n=0
+            p=[]
+    if p:
+        yield cu.concatenate(p, axis=0)
 
 def blit(dst, src, dst_y=0, dst_x=0):
     rows,cols = src.shape[:2]
     dst[dst_y:dst_y+rows , dst_x:dst_x+cols] = src
 
+class OutputBuffer:
+    def __init__(self, tiles_x, tile, subsamples, np):
+        self.np = np
+        self.tile_size = tile
+        self.subsamples = subsamples
+        self.samples_per_tile = tile*tile*subsamples
+        self.tiles_x = tiles_x
+        self.progress = 0
+        self.rows = []
+        self.current_row = []
+        self.dtype='float32'
+
+    def memtest(self, dim):
+        buf = self.np.zeros(dim, dtype=self.dtype) # fail here if not enough memory
+        del buf
+
+    def put(self, many_many_samples, progbar):
+        p = len(many_many_samples)
+        for samples in batched_list(many_many_samples, self.samples_per_tile):
+            t = self.tile_size
+            mean = samples.reshape((t,t,self.subsamples))
+            mean = mean.mean(axis=2,keepdims=True, dtype=self.dtype)
+            mean = mean.reshape((t,t))
+            self.current_row += [mean]
+            if len(self.current_row) == self.tiles_x:
+                self.rows += [self.np.concatenate(self.current_row, axis=1, dtype=self.dtype)]
+                self.current_row = []
+        progbar.update(p)
+
+    def finish(self):
+        buf = self.np.concatenate(self.rows, axis=0, dtype=self.dtype)
+        if self.np != np:
+            buf = buf.get()
+        return buf.astype(self.dtype)
+
 def render_main(dim1, fractal, subsamples, tile, cupy_device=None):
     dim=(dim1[0]+tile-1)//tile*tile , (dim1[1]+tile-1)//tile*tile
     ntx,nty,coords_n = next(coords_gen(dim, tile, 'count', subsamples))
+    total_samples = dim[0]*dim[1]*subsamples
+
     print('Buffer size:', dim)
     print(f'Tile size: {tile}x{tile}x{subsamples} = {tile*tile*subsamples}')
     print('Tiles:', coords_n)
     print('Tiles/process:', coords_n/NPROC)
 
-    with tqdm(total=dim[0]*dim[1]*subsamples) as progress:
-        if cupy_device is not None:
-            tiles_per_proc = 64
-            threads = min(NPROC, 4)
-            print('cupy mode, device:', cupy_device)
+    if cupy_device is not None:
+        tiles_per_proc = 16
+        threads = 64
+        print('cupy mode, device:', cupy_device)
 
+        with tqdm(total=total_samples) as progress:
             with cupy.cuda.Device(cupy_device):
-                buf = cupy.zeros(dim, dtype='float32') # fail here if not enough GPU memory
-                del buf
-                buf = None
-                buf_row = []
                 fractal.init_cupy()
-                coords = coords_gen(dim, tile, 'gen', subsamples, cu=np, dtype='float32')
-                with tqdm(total=dim[0]*dim[1]*subsamples) as progress:
-                    with multiprocessing.dummy.Pool(threads) as pool:
-                        for tile_pos, result in pool.imap(fractal.sample_cupy, coords, chunksize=tiles_per_proc):
-                            p = len(result)
-                            mean = result.reshape((tile,tile,subsamples)).mean(axis=2,keepdims=True).reshape((tile,tile))
-                            buf_row += [mean]
-                            if len(buf_row) == ntx:
-                                temp = cupy.concatenate(buf_row, axis=1)
-                                buf = temp if buf is None else cupy.concatenate((buf, temp), axis=0)
-                                buf_row = []
-                            progress.update(p)
-                buf = cupy.asnumpy(buf)
-        else:
-            print('CPU-only mode. Using processes:', NPROC)
-            tiles_per_proc = 256
-            buf = np.zeros(dim, dtype='float32')
+                buf = OutputBuffer(ntx, tile, subsamples, cupy)
+                buf.memtest(dim)
+                coords = coords_gen(dim, tile, 'gen', subsamples, cu=cupy, dtype='float32')
+                #coords = merge_tiles(coords, min_batch_size=10000, cu=cupy)
+                with multiprocessing.dummy.Pool(threads) as pool:
+                    for result in pool.imap(fractal.sample_cupy, coords, chunksize=tiles_per_proc):
+                        buf.put(result, progress)
+                buf = buf.finish()
+    else:
+        print('CPU-only mode. Using processes:', NPROC)
+        buf = OutputBuffer(ntx, tile, subsamples, np)
+        buf.memtest(dim)
+        tiles_per_proc = 256
 
+        with tqdm(total=total_samples) as progress:
             coords = coords_gen(dim, tile, 'gen', subsamples, cu=np, dtype='float64')
+            coords = merge_tiles(coords, min_batch_size=MAX_SAMPLE_BATCH, cu=np)
             with multiprocessing.Pool(NPROC) as pool:
-                for tile_pos, result in pool.imap(fractal.sample, coords, chunksize=tiles_per_proc):
-                    p=len(result)
-                    mean = result.reshape((tile,tile,subsamples)).mean(axis=2,keepdims=True).reshape((tile,tile))
-                    blit(buf, mean, *tile_pos)
-                    progress.update(p)
+                for result in pool.imap(fractal.sample, coords, chunksize=tiles_per_proc):
+                    buf.put(result, progress)
+        buf = buf.finish()
 
     buf = buf.reshape((dim[0],dim[1],-1))
     buf = buf[:dim1[0],:dim1[1],:]
+    buf = buf.astype('float32')
     return buf
 
 def colorize(buf):
