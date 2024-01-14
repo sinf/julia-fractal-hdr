@@ -18,6 +18,19 @@ except ImportError:
 def batched_list(items, batch_size):
     return ( items[i:i+batch_size] for i in range(0, len(items), batch_size) )
 
+def batched_gen(iterable, batch_size):
+    b=[]
+    while True:
+        try:
+            b.append(next(iterable))
+        except StopIteration:
+            break
+        if len(b) >= batch_size:
+            yield b
+            b=[]
+    if b:
+        yield b
+
 NPROC=multiprocessing.cpu_count()
 MAX_SAMPLE_BATCH=1024
 
@@ -104,7 +117,7 @@ def coords_gen(dim, tile, mode, k, cu=np, dtype='float64'):
     subpos=cu.asarray(subpos)
     for ty in range(nty):
         for tx in range(ntx):
-            points=None
+            points=[]
             for yy in range(tile):
                 y=ty*tile + yy
                 if y>=dimy:
@@ -115,21 +128,12 @@ def coords_gen(dim, tile, mode, k, cu=np, dtype='float64'):
                         break
                     co=(x/(dimx-1), 1-y/(dimy-1))
                     p=subpos + cu.array(co, dtype=dtype)
-                    points=p if points is None else cu.concatenate((points, p))
-            yield points
+                    points += [p]
+            yield cu.concatenate(points, dtype=dtype)
 
 def merge_tiles(all_points, min_batch_size, cu=np):
-    n=0
-    p=[]
-    for points in all_points:
-        p += [points]
-        n += len(points)
-        if n >= min_batch_size:
-            yield cu.concatenate(p, axis=0)
-            n=0
-            p=[]
-    if p:
-        yield cu.concatenate(p, axis=0)
+    for b in batched_gen(all_points, min_batch_size):
+        yield cu.concatenate(b, axis=0)
 
 def blit(dst, src, dst_y=0, dst_x=0):
     rows,cols = src.shape[:2]
@@ -179,10 +183,13 @@ def render_main(dim1, fractal, subsamples, tile, cupy_device=None):
     print(f'Tile size: {tile}x{tile}x{subsamples} = {tile*tile*subsamples}')
     print('Tiles:', coords_n)
     print('Tiles/process:', coords_n/NPROC)
+    print()
+    print()
+    print()
 
     if cupy_device is not None:
         tiles_per_proc = 16
-        threads = 64
+        threads = 4
         print('cupy mode, device:', cupy_device)
 
         with tqdm(total=total_samples) as progress:
@@ -190,21 +197,28 @@ def render_main(dim1, fractal, subsamples, tile, cupy_device=None):
                 fractal.init_cupy()
                 buf = OutputBuffer(ntx, tile, subsamples, cupy)
                 buf.memtest(dim)
-                coords = coords_gen(dim, tile, 'gen', subsamples, cu=cupy, dtype='float32')
-                #coords = merge_tiles(coords, min_batch_size=10000, cu=cupy)
-                with multiprocessing.dummy.Pool(threads) as pool:
-                    for result in pool.imap(fractal.sample_cupy, coords, chunksize=tiles_per_proc):
-                        buf.put(result, progress)
+                m = max(1, 320000 // buf.samples_per_tile)
+                coords = coords_gen(dim, tile, 'gen', subsamples, cu=np, dtype='float32')
+                coords = merge_tiles(coords, m, cu=np)
+                coords = (cupy.asarray(c) for c in coords)
+                if True:
+                    with multiprocessing.dummy.Pool(threads) as pool:
+                        for result in pool.imap(fractal.sample_cupy, coords, chunksize=tiles_per_proc):
+                            buf.put(result, progress)
+                else:
+                    for coords1 in coords:
+                        buf.put(fractal.sample_cupy(cupy.asarray(coords1)), progress)
                 buf = buf.finish()
     else:
         print('CPU-only mode. Using processes:', NPROC)
         buf = OutputBuffer(ntx, tile, subsamples, np)
         buf.memtest(dim)
-        tiles_per_proc = 256
+        tiles_per_proc = 16
+        m = max(1, MAX_SAMPLE_BATCH // buf.samples_per_tile)
 
         with tqdm(total=total_samples) as progress:
             coords = coords_gen(dim, tile, 'gen', subsamples, cu=np, dtype='float64')
-            coords = merge_tiles(coords, min_batch_size=MAX_SAMPLE_BATCH, cu=np)
+            coords = merge_tiles(coords, m, cu=np)
             with multiprocessing.Pool(NPROC) as pool:
                 for result in pool.imap(fractal.sample, coords, chunksize=tiles_per_proc):
                     buf.put(result, progress)
