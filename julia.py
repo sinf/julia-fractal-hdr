@@ -306,6 +306,15 @@ def viewbox_at(center, scale, dimx, dimy):
     t = center[1] + y
     return (l, b, r, t)
 
+def anim_offset_func(t):
+    sin=np.sin
+    cos=np.cos
+    t*=2*np.pi
+    c=t*2
+    b=t*3
+    a=t*4
+    return np.array(( sin(a)*sin(a)+cos(a)*cos(b) , (sin(c)+cos(b)+sin(a) )*0.5 ))
+
 def main():
     global NPROC
 
@@ -324,6 +333,7 @@ def main():
       help='Set device index [0]', metavar='ID')
     ap.add_argument('-t', '--tile-size', default=4, type=int,
       help='Tile size NxN [4]', metavar='N')
+    ap.add_argument('-a', '--anim-offset', default=None, type=float)
     args=ap.parse_args()
 
     ss=args.supersample
@@ -338,7 +348,14 @@ def main():
 
     t0=time.time()
 
-    fractal=Julia(c=(0.37+0.1j), viewbox=viewbox_at((0.165,0.12),0.15,dim[1],dim[0]))
+    org = (0.165,0.12)
+    c = (0.37+0.1j)
+    scale = 0.15
+
+    if args.anim_offset is not None:
+        c += complex(*tuple(anim_offset_func(args.anim_offset)*0.05))
+
+    fractal=Julia(c=c, viewbox=viewbox_at(org,scale,dim[1],dim[0]))
     buf=render_main(dim, fractal, ss, args.tile_size, cupy_device=args.cupy_device if args.cupy else None)
 
     t1=time.time()
