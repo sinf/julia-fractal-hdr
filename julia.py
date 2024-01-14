@@ -45,7 +45,7 @@ class Julia:
         if len(points) <= MAX_SAMPLE_BATCH:
             values = self.sample1(points)
         else:
-            values = np.array([], dtype='float64')
+            values = np.array([], dtype=tile[1].dtype)
             for B in batched(points, MAX_SAMPLE_BATCH): 
                 values = np.concatenate((values, self.sample1(B)))
         return whatever, values
@@ -56,8 +56,13 @@ class Julia:
         output: 1d numpy array of intensity
         """
         z = self.view_org + self.view_scale*points
-        z = z.astype('float64').view(dtype=np.complex128).flatten()
-        c = self.c
+        if z.dtype == 'float64':
+            z = z.flatten().view(dtype=np.complex128)
+            c = np.complex128(self.c)
+        else:
+            assert z.dtype == 'float32'
+            z = z.flatten().view(dtype=np.complex64)
+            c = np.complex64(self.c)
         n = np.zeros(len(points), dtype=int)
         with np.errstate(divide='ignore', under='ignore', over='ignore', invalid='ignore'):
             for _ in range(self.max_iter):
@@ -75,36 +80,13 @@ class Julia:
         return n - np.log(np.log(za)).flatten() / np.log(2)
 
     def sample_cupy(self, tile):
-        return tile[0], self.sample_cupy2(tile[1])
-        #return tile[0], self.sample_cupy1(tile[1])
-
-    def sample_cupy1(self, points):
+        whatever, points = tile
         px,py = cupy.asarray(points, dtype='float32').T
         result = cupy.zeros(len(points), dtype='float32')
-        return self.cupy_kernel(px, py, result)
-
-    def sample_cupy2(self, points):
-        z = self.view_org_cupy + self.view_scale_cupy * cupy.asarray(points, dtype='float32')
-        z = z.astype('float32').view(dtype=cupy.complex64).flatten()
-        c = self.c_cupy
-        n = cupy.zeros(len(points), dtype=int)
-        for _ in range(self.max_iter):
-            z1 = z*z + c
-            mask = ( z1.real*z1.real + z1.imag*z1.imag > 2*2 ).flatten()
-            masknot = ~mask
-            z = z*mask + z1*masknot
-            if mask.all():
-                break
-            n += masknot.astype(int)
-        for _ in range(3):
-            z = z*z + c
-        za = cupy.maximum(cupy.abs(z), 1.0000001)
-        return n - cupy.log(cupy.log(za)).flatten() / np.log(2)
+        result = self.cupy_kernel(px, py, result)
+        return whatever, result
 
     def init_cupy(self):
-        self.view_org_cupy = cupy.asarray(self.view_org, dtype='float32')
-        self.view_scale_cupy = cupy.asarray(self.view_scale, dtype='float32')
-        self.c_cupy = cupy.complex64(self.c)
         c=self.c
         # line 1 is line 16
         # i is illegal variable name (cant redeclare)
@@ -112,25 +94,25 @@ class Julia:
 in_params = 'float32 px, float32 py',\
 out_params ='float32 y', \
 operation = f'''
-float za=0, zr, zi, zr1, zi1;
+double za=0, zr, zi, zr1, zi1;
 int n;
-zr = {self.view_org[0]} + {self.view_scale[0]}*px;
-zi = {self.view_org[1]} + {self.view_scale[1]}*py;
+zr = {self.view_org[0]} + {self.view_scale[0]}*(double)px;
+zi = {self.view_org[1]} + {self.view_scale[1]}*(double)py;
 for(n=0; n<{self.max_iter}; n+=1) {{
   zr1 = zr*zr - zi*zi + {c.real};
   zi1 = 2*zr*zi + {c.imag};
   zr = zr1;
   zi = zi1;
   za = zr*zr + zi*zi;
-  if (za > 4.0f) break;
+  if (za > 4.0) break;
 }}
-za = max(za, 1.0000001f);
-za = sqrtf(za);
-y = n - logf(logf(za)) * {1.0/np.log(2)} ;
+za = max(za, 1.0000001);
+za = sqrt(za);
+y = n - log(log(za)) * {1.0/np.log(2)} ;
 ''', \
 name='julia')
 
-def coords_gen(dim, tile, mode, k, dtype='float64'):
+def coords_gen(dim, tile, mode, k, cu=np, dtype='float64'):
     dimy,dimx = dim
     ntx=(dimx+tile-1)//tile
     nty=(dimy+tile-1)//tile
@@ -138,9 +120,10 @@ def coords_gen(dim, tile, mode, k, dtype='float64'):
         yield (ntx, nty, ntx*nty)
         return
     subpos=(Halton(d=2).random(k)-0.5)/np.array((dimx,dimy))
+    subpos=cu.asarray(subpos)
     for ty in range(nty):
         for tx in range(ntx):
-            points=[]
+            points=None
             for yy in range(tile):
                 y=ty*tile + yy
                 if y>=dimy:
@@ -149,75 +132,64 @@ def coords_gen(dim, tile, mode, k, dtype='float64'):
                     x=tx*tile + xx
                     if x>=dimx:
                         break
-                    p=np.array((x/(dimx-1), 1-y/(dimy-1)))
-                    for offset in subpos:
-                        points.append( offset + p )
-            yield (ty*tile, tx*tile), np.array(points, dtype=dtype)
+                    co=(x/(dimx-1), 1-y/(dimy-1))
+                    p=subpos + cu.array(co, dtype=dtype)
+                    points=p if points is None else cu.concatenate((points, p))
+            yield (ty*tile, tx*tile), points
 
 def blit(dst, src, dst_y=0, dst_x=0):
     rows,cols = src.shape[:2]
     dst[dst_y:dst_y+rows , dst_x:dst_x+cols] = src
 
-def render_ss(dim1, sample, subsamples):
-    tiles_per_proc = 256  # each process gets this many tiles
-    tile = 4
+def render_main(dim1, fractal, subsamples, tile, cupy_device=None):
     dim=(dim1[0]+tile-1)//tile*tile , (dim1[1]+tile-1)//tile*tile
     ntx,nty,coords_n = next(coords_gen(dim, tile, 'count', subsamples))
-    coords = coords_gen(dim, tile, 'gen', subsamples)
     print('Buffer size:', dim)
     print(f'Tile size: {tile}x{tile}x{subsamples} = {tile*tile*subsamples}')
     print('Tiles:', coords_n)
     print('Tiles/process:', coords_n/NPROC)
 
-    buf = np.zeros(dim, dtype='float64')
     with tqdm(total=dim[0]*dim[1]*subsamples) as progress:
-        with multiprocessing.Pool(NPROC) as pool:
-            for tile_pos, result in pool.imap(sample, coords, chunksize=tiles_per_proc):
-                p=len(result)
-                mean = result.reshape((tile,tile,subsamples)).mean(axis=2,keepdims=True).reshape((tile,tile))
-                blit(buf, mean, *tile_pos)
-                progress.update(p)
+        if cupy_device is not None:
+            tiles_per_proc = 64
+            threads = min(NPROC, 4)
+            print('cupy mode, device:', cupy_device)
 
-    buf = buf.reshape((dim[0],dim[1],-1))
-    buf = buf[:dim1[0],:dim1[1],:]
-    return buf
+            with cupy.cuda.Device(cupy_device):
+                buf = cupy.zeros(dim, dtype='float32') # fail here if not enough GPU memory
+                del buf
+                buf = None
+                buf_row = []
+                fractal.init_cupy()
+                coords = coords_gen(dim, tile, 'gen', subsamples, cu=np, dtype='float32')
+                with tqdm(total=dim[0]*dim[1]*subsamples) as progress:
+                    with multiprocessing.dummy.Pool(threads) as pool:
+                        for tile_pos, result in pool.imap(fractal.sample_cupy, coords, chunksize=tiles_per_proc):
+                            p = len(result)
+                            mean = result.reshape((tile,tile,subsamples)).mean(axis=2,keepdims=True).reshape((tile,tile))
+                            buf_row += [mean]
+                            if len(buf_row) == ntx:
+                                temp = cupy.concatenate(buf_row, axis=1)
+                                buf = temp if buf is None else cupy.concatenate((buf, temp), axis=0)
+                                buf_row = []
+                            progress.update(p)
+                buf = cupy.asnumpy(buf)
+        else:
+            print('CPU-only mode. Using processes:', NPROC)
+            tiles_per_proc = 256
+            buf = np.zeros(dim, dtype='float32')
 
-def render_cupy(dim1, sample, subsamples):
-    tiles_per_proc = 8  # each process gets this many tiles
-    tile = 4
-    dim=(dim1[0]+tile-1)//tile*tile , (dim1[1]+tile-1)//tile*tile
-    ntx,nty,coords_n = next(coords_gen(dim, tile, 'count', subsamples))
-    coords = coords_gen(dim, tile, 'gen', subsamples, dtype='float32')
-    print('Buffer size:', dim)
-    print(f'Tile size: {tile}x{tile}x{subsamples} = {tile*tile*subsamples}')
-    print('Tiles:', coords_n)
-    print('Tiles/process:', coords_n/NPROC)
-
-    buf = np.zeros(dim, dtype='float32')
-    def iterate1():
-        with tqdm(total=dim[0]*dim[1]*subsamples) as progress:
-            for thing in coords:
-                p=len(thing[1])
-                yield sample(thing)
-                progress.update(p)
-
-    def iteratemp():
-        with tqdm(total=dim[0]*dim[1]*subsamples) as progress:
-            with multiprocessing.dummy.Pool(min(NPROC,4)) as pool:
-                for thing in pool.imap(sample, coords, chunksize=tiles_per_proc):
-                    p=len(thing[1])
-                    yield thing
+            coords = coords_gen(dim, tile, 'gen', subsamples, cu=np, dtype='float64')
+            with multiprocessing.Pool(NPROC) as pool:
+                for tile_pos, result in pool.imap(fractal.sample, coords, chunksize=tiles_per_proc):
+                    p=len(result)
+                    mean = result.reshape((tile,tile,subsamples)).mean(axis=2,keepdims=True).reshape((tile,tile))
+                    blit(buf, mean, *tile_pos)
                     progress.update(p)
 
-    for tile_pos, result in iteratemp():
-        mean = result.reshape((tile,tile,subsamples)).mean(axis=2,keepdims=True).reshape((tile,tile))
-        mean = cupy.asnumpy(mean)
-        blit(buf, mean, *tile_pos)
-
     buf = buf.reshape((dim[0],dim[1],-1))
     buf = buf[:dim1[0],:dim1[1],:]
     return buf
-
 
 def colorize(buf):
     def hexcolor(x):
@@ -310,32 +282,26 @@ def main():
       help=f'Parallel processes to use [{NPROC}]', metavar='COUNT')
     ap.add_argument('-c', '--cupy', default=False, action='store_true',
       help='Calculate on video card using cupy')
-    ap.add_argument('-d', '--cupy-device', default=0,
+    ap.add_argument('-d', '--cupy-device', default=0, type=int,
       help='Set device index [0]', metavar='ID')
+    ap.add_argument('-t', '--tile-size', default=4, type=int,
+      help='Tile size NxN [4]', metavar='N')
     args=ap.parse_args()
 
     ss=args.supersample
     ss=ss*ss
     dim=(args.resolution[1], args.resolution[0])
-    n_samples=ss*ss*dim[0]*dim[1]
+    n_samples=ss*dim[0]*dim[1]
     NPROC=args.nproc
 
-    print('Using processes:', NPROC)
-    print('Samples/pixel', ss**2)
+    print('Samples/pixel', ss)
     print('Total samples to calculate:', n_samples)
     print('Outputs', args.output)
 
     t0=time.time()
 
     fractal=Julia(c=(0.37+0.1j), viewbox=viewbox_at((0.165,0.12),0.15,dim[1],dim[0]))
-
-    if args.cupy:
-        print('Attempting to use cupy')
-        fractal.init_cupy()
-        with cupy.cuda.Device(args.cupy_device):
-            buf=render_cupy(dim, fractal.sample_cupy, ss)
-    else:
-        buf=render_ss(dim, fractal.sample, ss)
+    buf=render_main(dim, fractal, ss, args.tile_size, cupy_device=args.cupy_device if args.cupy else None)
 
     t1=time.time()
     elapsed=t1-t0
