@@ -37,7 +37,7 @@ MAX_SAMPLE_BATCH=1024
 class Julia:
     def __init__(self, c, viewbox, max_iter=1000):
         """ viewbox: (min real, min imag, max real, max imag) """
-        self.c = np.complex128(c)
+        self.c = c
         self.max_iter = max_iter
         self.view_org = np.array((viewbox[0], viewbox[1]))
         self.view_scale = np.array((viewbox[2]-viewbox[0], viewbox[3]-viewbox[1]))
@@ -353,7 +353,7 @@ def main():
     scale = 0.15
 
     if args.anim_offset is not None:
-        c += complex(*tuple(anim_offset_func(args.anim_offset)*0.05))
+        c += complex(*tuple(anim_offset_func(args.anim_offset)*0.001))
 
     fractal=Julia(c=c, viewbox=viewbox_at(org,scale,dim[1],dim[0]))
     buf=render_main(dim, fractal, ss, args.tile_size, cupy_device=args.cupy_device if args.cupy else None)

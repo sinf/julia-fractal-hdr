@@ -1,6 +1,6 @@
 
-fps=30
-duration=30
+fps=10
+duration=10
 frames=$((fps * duration))
 mkdir -p frames
 echo >Makefile
@@ -14,7 +14,7 @@ for i in `seq $frames`; do
     cat - <<END >>Makefile
 $fn:
 	echo "\$@"
-	@python julia.py -r 360 240 -s 6 -t 16 -c -o \$@ -a $t
+	@python julia.py -r 360 240 -s 6 -t 8 -c -o \$@ -a $t
 
 END
 done
